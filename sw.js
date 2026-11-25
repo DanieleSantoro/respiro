@@ -1,6 +1,6 @@
 /* Respiro — service worker: l'app si apre anche senza internet.
    Quando aggiorni index.html, cambia VERSION (es. v2) così l'iPhone scarica la nuova versione. */
-const VERSION = 'respiro-v3';
+const VERSION = 'respiro-v6';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-180.png', './icon-512.png', './splash-1179x2556.png', './splash-dark-1179x2556.png'];
 
 self.addEventListener('install', e => {

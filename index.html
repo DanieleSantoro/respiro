@@ -65,8 +65,38 @@
     .bar { transition: width .7s cubic-bezier(.2,.8,.2,1); }
     .fade-in { animation: fade .35s ease both; }
     @keyframes fade { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
-    body.sheet-open { overflow:hidden; }
+    body.sheet-open, body.breath-open { overflow:hidden; }
     .no-scrollbar::-webkit-scrollbar { display:none; }
+
+    /* ---------- Respiro guidato (overlay a tutto schermo) ---------- */
+    #breath {
+      position:fixed; inset:0; z-index:70; background:rgb(var(--cream));
+      display:flex; flex-direction:column; align-items:center; justify-content:space-between;
+      padding: max(env(safe-area-inset-top), 16px) 20px calc(env(safe-area-inset-bottom) + 24px);
+      opacity:0; transition:opacity .4s ease;
+    }
+    #breath.on { opacity:1; }
+    .justify-end { justify-content:flex-end; }   /* non presente nel Tailwind pre-compilato */
+
+    /* ---------- Interruttore stile iOS (giornata pesante) ---------- */
+    .sw { position:relative; width:51px; height:31px; border-radius:999px; background:rgb(var(--fg)/.12); transition:background .2s ease; flex-shrink:0; }
+    .sw::after { content:''; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff; box-shadow:0 2px 4px rgba(0,0,0,.2); transition:transform .2s ease; }
+    .sw.on { background:#9A8CCB; }
+    .sw.on::after { transform:translateX(20px); }
+    @media (prefers-reduced-motion: reduce) { .sw, .sw::after { transition:none; } }
+    .br-stage { position:relative; width:min(72vw, 280px); aspect-ratio:1; display:flex; align-items:center; justify-content:center; }
+    .br-halo { position:absolute; inset:0; border-radius:50%; background:rgb(var(--s100)); }   /* guida: la grandezza massima */
+    .br-ball {
+      position:absolute; inset:0; border-radius:50%;
+      background:radial-gradient(circle at 35% 30%, #A9C4A8, #6F9772 72%);
+      box-shadow:0 12px 40px rgba(111,151,114,.35);
+      transform:scale(.5); will-change:transform, opacity;
+    }
+    html.dark .br-ball { box-shadow:0 12px 40px rgba(0,0,0,.45); }
+    .br-num { position:relative; font-size:40px; font-weight:600; color:#fff; font-variant-numeric:tabular-nums; min-height:1em; }
+    .br-dot { width:8px; height:8px; border-radius:50%; background:rgb(var(--fg)/.12); transition:background .4s ease; }
+    .br-dot.on { background:#8AAE8A; }
+    @media (prefers-reduced-motion: reduce) { #breath, .br-dot { transition:none; } }
   </style>
 </head>
 <body class="bg-cream text-ink min-h-screen">
@@ -75,6 +105,7 @@
   <main id="view" class="px-4 max-w-xl mx-auto"></main>
   <nav id="tabbar" class="fixed bottom-0 inset-x-0 z-40 bg-surface/85 backdrop-blur-xl border-t border-black/5"></nav>
   <div id="sheet-root"></div>
+  <div id="breath-root"></div>
   <div id="toast" class="fixed left-1/2 -translate-x-1/2 z-[60] pointer-events-none opacity-0 transition-all duration-300 translate-y-2"></div>
 
 <script>
@@ -137,6 +168,10 @@ const defaults = () => ({
   exams: [],               // [{id,name,date,units,unit,goals:[{id,text,done}]}]
   tx: [],                  // [{id,type:'in'|'out',amount,cat,note,date,created}]
   theme: 'auto',            // 'auto' | 'light' | 'dark'
+  hourlyPay: 0,             // paga oraria lorda in € (0 = non impostata)
+  workEnd: '2026-12-26',    // ultimo giorno di lavoro al negozio ('' = nessun countdown)
+  heavyDay: '',             // 'YYYY-MM-DD' del giorno in cui è attiva la "giornata pesante"
+  heavyPick: '',            // id della priorità scelta per quella giornata
   focus: { work:25, brk:5, sessions:{} },
   timer: null              // {mode,running,endAt,remaining}
 });
@@ -170,6 +205,7 @@ const cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const eur = n => new Intl.NumberFormat('it-IT', { style:'currency', currency:'EUR' }).format(n || 0);
+const eur0 = n => new Intl.NumberFormat('it-IT', { style:'currency', currency:'EUR', minimumFractionDigits:0, maximumFractionDigits:0 }).format(n || 0);
 const fmtLong = s => cap(fromIso(s).toLocaleDateString('it-IT', { weekday:'long', day:'numeric', month:'long' }));
 const fmtShort = s => fromIso(s).toLocaleDateString('it-IT', { weekday:'short', day:'numeric', month:'short' });
 const monthLabel = ym => { const [y, m] = ym.split('-').map(Number); return cap(new Date(y, m - 1, 1).toLocaleDateString('it-IT', { month:'long', year:'numeric' })); };
@@ -182,7 +218,7 @@ function parseAmount(v) {
   const n = parseFloat(s);
   return isFinite(n) ? Math.round(n * 100) / 100 : NaN;
 }
-const ICONS = {"arrow-down-left":"<path d=\"M17 7 7 17\" /><path d=\"M17 17H7V7\" />","arrow-up-right":"<path d=\"M7 7h10v10\" /><path d=\"M7 17 17 7\" />","book":"<path d=\"M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20\" />","book-open":"<path d=\"M12 5v16\" /><path d=\"M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z\" />","briefcase":"<path d=\"M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16\" /><rect width=\"20\" height=\"14\" x=\"2\" y=\"6\" rx=\"2\" />","bus":"<path d=\"M8 6v6\" /><path d=\"M15 6v6\" /><path d=\"M2 12h19.6\" /><path d=\"M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2 0-.4-.1-.8-.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3\" /><circle cx=\"7\" cy=\"18\" r=\"2\" /><path d=\"M9 18h5\" /><circle cx=\"16\" cy=\"18\" r=\"2\" />","calendar-days":"<path d=\"M8 2v3\" /><path d=\"M16 2v3\" /><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" /><path d=\"M3 9h18\" /><path d=\"M8 13h.01\" /><path d=\"M12 13h.01\" /><path d=\"M16 13h.01\" /><path d=\"M8 17h.01\" /><path d=\"M12 17h.01\" /><path d=\"M16 17h.01\" />","calendar-plus":"<path d=\"M16 18h6\" /><path d=\"M16 2v3\" /><path d=\"M19 15v6\" /><path d=\"M21 11.5V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h8.3\" /><path d=\"M3 9h18\" /><path d=\"M8 2v3\" />","cat":"<path d=\"M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-.42 7 .57 1.07 1 2.24 1 3.44C21 17.9 16.97 21 12 21s-9-3-9-7.56c0-1.25.5-2.4 1-3.44 0 0-1.89-6.42-.5-7 1.39-.58 4.72.23 6.5 2.23A9.04 9.04 0 0 1 12 5Z\" /><path d=\"M8 14v.5\" /><path d=\"M16 14v.5\" /><path d=\"M11.25 16.25h1.5L12 17l-.75-.75Z\" />","check":"<path d=\"M20 6 9 17l-5-5\" />","chevron-down":"<path d=\"m6 9 6 6 6-6\" />","chevron-left":"<path d=\"m15 18-6-6 6-6\" />","chevron-right":"<path d=\"m9 18 6-6-6-6\" />","chevron-up":"<path d=\"m18 15-6-6-6 6\" />","circle-ellipsis":"<circle cx=\"12\" cy=\"12\" r=\"10\" /><path d=\"M17 12h.01\" /><path d=\"M12 12h.01\" /><path d=\"M7 12h.01\" />","coins":"<path d=\"M13.744 17.736a6 6 0 1 1-7.48-7.48\" /><path d=\"M15 6h1v4\" /><path d=\"m6.134 14.768.866-.5 2 3.464\" /><circle cx=\"16\" cy=\"8\" r=\"6\" />","corner-down-right":"<path d=\"m15 10 5 5-5 5\" /><path d=\"M4 4v7a4 4 0 0 0 4 4h12\" />","currency":"<circle cx=\"12\" cy=\"12\" r=\"8\" /><line x1=\"3\" x2=\"6\" y1=\"3\" y2=\"6\" /><line x1=\"21\" x2=\"18\" y1=\"3\" y2=\"6\" /><line x1=\"3\" x2=\"6\" y1=\"21\" y2=\"18\" /><line x1=\"21\" x2=\"18\" y1=\"21\" y2=\"18\" />","download":"<path d=\"M12 15V3\" /><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\" /><path d=\"m7 10 5 5 5-5\" />","eye":"<path d=\"M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0\" /><circle cx=\"12\" cy=\"12\" r=\"3\" />","eye-off":"<path d=\"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49\" /><path d=\"M14.084 14.158a3 3 0 0 1-4.242-4.242\" /><path d=\"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143\" /><path d=\"m2 2 20 20\" />","file":"<path d=\"M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z\" /><path d=\"M14 2v5a1 1 0 0 0 1 1h5\" />","file-text":"<path d=\"M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z\" /><path d=\"M14 2v5a1 1 0 0 0 1 1h5\" /><path d=\"M10 9H8\" /><path d=\"M16 13H8\" /><path d=\"M16 17H8\" />","flower-2":"<path d=\"M12 5a3 3 0 1 1 3 3m-3-3a3 3 0 1 0-3 3m3-3v1M9 8a3 3 0 1 0 3 3M9 8h1m5 0a3 3 0 1 1-3 3m3-3h-1m-2 3v-1\" /><circle cx=\"12\" cy=\"8\" r=\"2\" /><path d=\"M12 10v12\" /><path d=\"M12 22c4.2 0 7-1.667 7-5-4.2 0-7 1.667-7 5Z\" /><path d=\"M12 22c-4.2 0-7-1.667-7-5 4.2 0 7 1.667 7 5Z\" />","form":"<path d=\"M4 14h6\" /><path d=\"M4 2h10\" /><rect x=\"4\" y=\"18\" width=\"16\" height=\"4\" rx=\"1\" /><rect x=\"4\" y=\"6\" width=\"16\" height=\"4\" rx=\"1\" />","gift":"<path d=\"M12 7v14\" /><path d=\"M20 11v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8\" /><path d=\"M7.5 7a1 1 0 0 1 0-5A4.8 8 0 0 1 12 7a4.8 8 0 0 1 4.5-5 1 1 0 0 1 0 5\" /><rect x=\"3\" y=\"7\" width=\"18\" height=\"4\" rx=\"1\" />","goal":"<path d=\"M12 13V2l8 4-8 4\" /><path d=\"M20.561 10.222a9 9 0 1 1-12.55-5.29\" /><path d=\"M8.002 9.997a5 5 0 1 0 8.9 2.02\" />","graduation-cap":"<path d=\"M21.42 10.922a1 1 0 0 0-.019-1.838L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.832l8.57 3.908a2 2 0 0 0 1.66 0z\" /><path d=\"M22 10v6\" /><path d=\"M6 12.5V16a6 3 0 0 0 12 0v-3.5\" />","house":"<path d=\"M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8\" /><path d=\"M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z\" />","leaf":"<path d=\"M11 20a10 10 0 0010-10 25.9 25.9 0 00-1.04-7.281 1 1 0 00-1.755-.325C15.833 5.5 13 5.5 9.8 6.1A7 7 0 0011 20\" /><path d=\"M2 21a5 5 0 012.911-4.544C7.613 15.212 8.351 15.24 11 13\" />","moon":"<path d=\"M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401\" />","pause":"<rect x=\"14\" y=\"3\" width=\"5\" height=\"18\" rx=\"1\" /><rect x=\"5\" y=\"3\" width=\"5\" height=\"18\" rx=\"1\" />","pencil":"<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\" /><path d=\"m15 5 4 4\" />","play":"<path d=\"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z\" />","plus":"<path d=\"M5 12h14\" /><path d=\"M12 5v14\" />","radio":"<path d=\"M16.247 7.761a6 6 0 0 1 0 8.478\" /><path d=\"M19.075 4.933a10 10 0 0 1 0 14.134\" /><path d=\"M4.925 19.067a10 10 0 0 1 0-14.134\" /><path d=\"M7.753 16.239a6 6 0 0 1 0-8.478\" /><circle cx=\"12\" cy=\"12\" r=\"2\" />","repeat":"<path d=\"m17 2 4 4-4 4\" /><path d=\"M3 11v-1a4 4 0 0 1 4-4h14\" /><path d=\"m7 22-4-4 4-4\" /><path d=\"M21 13v1a4 4 0 0 1-4 4H3\" />","replace":"<path d=\"M14 4a1 1 0 0 1 1-1\" /><path d=\"M15 10a1 1 0 0 1-1-1\" /><path d=\"M21 4a1 1 0 0 0-1-1\" /><path d=\"M21 9a1 1 0 0 1-1 1\" /><path d=\"m3 7 3 3 3-3\" /><path d=\"M6 10V5a2 2 0 0 1 2-2h2\" /><rect x=\"3\" y=\"14\" width=\"7\" height=\"7\" rx=\"1\" />","rotate-ccw":"<path d=\"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8\" /><path d=\"M3 3v5h5\" />","settings":"<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\" /><circle cx=\"12\" cy=\"12\" r=\"3\" />","shopping-bag":"<path d=\"M16 10a4 4 0 0 1-8 0\" /><path d=\"M3.103 6.034h17.794\" /><path d=\"M3.4 5.467a2 2 0 0 0-.4 1.2V20a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6.667a2 2 0 0 0-.4-1.2l-2-2.667A2 2 0 0 0 17 2H7a2 2 0 0 0-1.6.8z\" />","skip-forward":"<path d=\"M21 4v16\" /><path d=\"M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z\" />","sparkles":"<path d=\"M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z\" /><path d=\"M20 2v4\" /><path d=\"M22 4h-4\" /><circle cx=\"4\" cy=\"20\" r=\"2\" />","split":"<path d=\"M16 3h5v5\" /><path d=\"M8 3H3v5\" /><path d=\"M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3\" /><path d=\"m15 9 6-6\" />","stroke-width":"<path d=\"M3.25 3h17.5\" /><rect x=\"3\" y=\"7\" width=\"18\" height=\"4\" rx=\"1\" /><rect x=\"3\" y=\"15\" width=\"18\" height=\"6\" rx=\"1\" />","sun":"<circle cx=\"12\" cy=\"12\" r=\"4\" /><path d=\"M12 2v2\" /><path d=\"M12 20v2\" /><path d=\"m4.93 4.93 1.41 1.41\" /><path d=\"m17.66 17.66 1.41 1.41\" /><path d=\"M2 12h2\" /><path d=\"M20 12h2\" /><path d=\"m6.34 17.66-1.41 1.41\" /><path d=\"m19.07 4.93-1.41 1.41\" />","sun-moon":"<path d=\"M12 2v2\" /><path d=\"M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715\" /><path d=\"M16 12a4 4 0 0 0-4-4\" /><path d=\"m19 5-1.256 1.256\" /><path d=\"M20 12h2\" />","sunrise":"<path d=\"M12 2v8\" /><path d=\"m4.93 10.93 1.41 1.41\" /><path d=\"M2 18h2\" /><path d=\"M20 18h2\" /><path d=\"m19.07 10.93-1.41 1.41\" /><path d=\"M22 22H2\" /><path d=\"m8 6 4-4 4 4\" /><path d=\"M16 18a4 4 0 0 0-8 0\" />","sunset":"<path d=\"M12 10V2\" /><path d=\"m4.93 10.93 1.41 1.41\" /><path d=\"M2 18h2\" /><path d=\"M20 18h2\" /><path d=\"m19.07 10.93-1.41 1.41\" /><path d=\"M22 22H2\" /><path d=\"m16 6-4 4-4-4\" /><path d=\"M16 18a4 4 0 0 0-8 0\" />","tag":"<path d=\"M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z\" /><circle cx=\"7.5\" cy=\"7.5\" r=\".5\" fill=\"currentColor\" />","text":"<path d=\"M21 5H3\" /><path d=\"M15 12H3\" /><path d=\"M17 19H3\" />","timer":"<line x1=\"10\" x2=\"14\" y1=\"2\" y2=\"2\" /><line x1=\"12\" x2=\"15\" y1=\"14\" y2=\"11\" /><circle cx=\"12\" cy=\"14\" r=\"8\" />","trash-2":"<path d=\"M10 11v6\" /><path d=\"M14 11v6\" /><path d=\"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6\" /><path d=\"M3 6h18\" /><path d=\"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\" />","type":"<path d=\"M12 4v16\" /><path d=\"M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2\" /><path d=\"M9 20h6\" />","upload":"<path d=\"M12 3v12\" /><path d=\"m17 8-5-5-5 5\" /><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\" />","utensils":"<path d=\"M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2\" /><path d=\"M7 2v20\" /><path d=\"M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7\" />","view":"<path d=\"M21 17v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2\" /><path d=\"M21 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v2\" /><circle cx=\"12\" cy=\"12\" r=\"1\" /><path d=\"M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0\" />","wallet":"<path d=\"M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1\" /><path d=\"M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4\" />"};
+const ICONS = {"arrow-down-left":"<path d=\"M17 7 7 17\" /><path d=\"M17 17H7V7\" />","arrow-up-right":"<path d=\"M7 7h10v10\" /><path d=\"M7 17 17 7\" />","book":"<path d=\"M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20\" />","book-open":"<path d=\"M12 5v16\" /><path d=\"M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z\" />","briefcase":"<path d=\"M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16\" /><rect width=\"20\" height=\"14\" x=\"2\" y=\"6\" rx=\"2\" />","bus":"<path d=\"M8 6v6\" /><path d=\"M15 6v6\" /><path d=\"M2 12h19.6\" /><path d=\"M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2 0-.4-.1-.8-.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3\" /><circle cx=\"7\" cy=\"18\" r=\"2\" /><path d=\"M9 18h5\" /><circle cx=\"16\" cy=\"18\" r=\"2\" />","calendar-days":"<path d=\"M8 2v3\" /><path d=\"M16 2v3\" /><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" /><path d=\"M3 9h18\" /><path d=\"M8 13h.01\" /><path d=\"M12 13h.01\" /><path d=\"M16 13h.01\" /><path d=\"M8 17h.01\" /><path d=\"M12 17h.01\" /><path d=\"M16 17h.01\" />","calendar-plus":"<path d=\"M16 18h6\" /><path d=\"M16 2v3\" /><path d=\"M19 15v6\" /><path d=\"M21 11.5V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h8.3\" /><path d=\"M3 9h18\" /><path d=\"M8 2v3\" />","cat":"<path d=\"M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-.42 7 .57 1.07 1 2.24 1 3.44C21 17.9 16.97 21 12 21s-9-3-9-7.56c0-1.25.5-2.4 1-3.44 0 0-1.89-6.42-.5-7 1.39-.58 4.72.23 6.5 2.23A9.04 9.04 0 0 1 12 5Z\" /><path d=\"M8 14v.5\" /><path d=\"M16 14v.5\" /><path d=\"M11.25 16.25h1.5L12 17l-.75-.75Z\" />","check":"<path d=\"M20 6 9 17l-5-5\" />","chevron-down":"<path d=\"m6 9 6 6 6-6\" />","chevron-left":"<path d=\"m15 18-6-6 6-6\" />","chevron-right":"<path d=\"m9 18 6-6-6-6\" />","chevron-up":"<path d=\"m18 15-6-6-6 6\" />","circle-ellipsis":"<circle cx=\"12\" cy=\"12\" r=\"10\" /><path d=\"M17 12h.01\" /><path d=\"M12 12h.01\" /><path d=\"M7 12h.01\" />","coins":"<path d=\"M13.744 17.736a6 6 0 1 1-7.48-7.48\" /><path d=\"M15 6h1v4\" /><path d=\"m6.134 14.768.866-.5 2 3.464\" /><circle cx=\"16\" cy=\"8\" r=\"6\" />","corner-down-right":"<path d=\"m15 10 5 5-5 5\" /><path d=\"M4 4v7a4 4 0 0 0 4 4h12\" />","currency":"<circle cx=\"12\" cy=\"12\" r=\"8\" /><line x1=\"3\" x2=\"6\" y1=\"3\" y2=\"6\" /><line x1=\"21\" x2=\"18\" y1=\"3\" y2=\"6\" /><line x1=\"3\" x2=\"6\" y1=\"21\" y2=\"18\" /><line x1=\"21\" x2=\"18\" y1=\"21\" y2=\"18\" />","download":"<path d=\"M12 15V3\" /><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\" /><path d=\"m7 10 5 5 5-5\" />","eye":"<path d=\"M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0\" /><circle cx=\"12\" cy=\"12\" r=\"3\" />","eye-off":"<path d=\"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49\" /><path d=\"M14.084 14.158a3 3 0 0 1-4.242-4.242\" /><path d=\"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143\" /><path d=\"m2 2 20 20\" />","file":"<path d=\"M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z\" /><path d=\"M14 2v5a1 1 0 0 0 1 1h5\" />","file-text":"<path d=\"M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z\" /><path d=\"M14 2v5a1 1 0 0 0 1 1h5\" /><path d=\"M10 9H8\" /><path d=\"M16 13H8\" /><path d=\"M16 17H8\" />","flower-2":"<path d=\"M12 5a3 3 0 1 1 3 3m-3-3a3 3 0 1 0-3 3m3-3v1M9 8a3 3 0 1 0 3 3M9 8h1m5 0a3 3 0 1 1-3 3m3-3h-1m-2 3v-1\" /><circle cx=\"12\" cy=\"8\" r=\"2\" /><path d=\"M12 10v12\" /><path d=\"M12 22c4.2 0 7-1.667 7-5-4.2 0-7 1.667-7 5Z\" /><path d=\"M12 22c-4.2 0-7-1.667-7-5 4.2 0 7 1.667 7 5Z\" />","form":"<path d=\"M4 14h6\" /><path d=\"M4 2h10\" /><rect x=\"4\" y=\"18\" width=\"16\" height=\"4\" rx=\"1\" /><rect x=\"4\" y=\"6\" width=\"16\" height=\"4\" rx=\"1\" />","gift":"<path d=\"M12 7v14\" /><path d=\"M20 11v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8\" /><path d=\"M7.5 7a1 1 0 0 1 0-5A4.8 8 0 0 1 12 7a4.8 8 0 0 1 4.5-5 1 1 0 0 1 0 5\" /><rect x=\"3\" y=\"7\" width=\"18\" height=\"4\" rx=\"1\" />","goal":"<path d=\"M12 13V2l8 4-8 4\" /><path d=\"M20.561 10.222a9 9 0 1 1-12.55-5.29\" /><path d=\"M8.002 9.997a5 5 0 1 0 8.9 2.02\" />","graduation-cap":"<path d=\"M21.42 10.922a1 1 0 0 0-.019-1.838L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.832l8.57 3.908a2 2 0 0 0 1.66 0z\" /><path d=\"M22 10v6\" /><path d=\"M6 12.5V16a6 3 0 0 0 12 0v-3.5\" />","house":"<path d=\"M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8\" /><path d=\"M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z\" />","leaf":"<path d=\"M11 20a10 10 0 0010-10 25.9 25.9 0 00-1.04-7.281 1 1 0 00-1.755-.325C15.833 5.5 13 5.5 9.8 6.1A7 7 0 0011 20\" /><path d=\"M2 21a5 5 0 012.911-4.544C7.613 15.212 8.351 15.24 11 13\" />","moon":"<path d=\"M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401\" />","pause":"<rect x=\"14\" y=\"3\" width=\"5\" height=\"18\" rx=\"1\" /><rect x=\"5\" y=\"3\" width=\"5\" height=\"18\" rx=\"1\" />","pencil":"<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\" /><path d=\"m15 5 4 4\" />","play":"<path d=\"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z\" />","plus":"<path d=\"M5 12h14\" /><path d=\"M12 5v14\" />","radio":"<path d=\"M16.247 7.761a6 6 0 0 1 0 8.478\" /><path d=\"M19.075 4.933a10 10 0 0 1 0 14.134\" /><path d=\"M4.925 19.067a10 10 0 0 1 0-14.134\" /><path d=\"M7.753 16.239a6 6 0 0 1 0-8.478\" /><circle cx=\"12\" cy=\"12\" r=\"2\" />","repeat":"<path d=\"m17 2 4 4-4 4\" /><path d=\"M3 11v-1a4 4 0 0 1 4-4h14\" /><path d=\"m7 22-4-4 4-4\" /><path d=\"M21 13v1a4 4 0 0 1-4 4H3\" />","replace":"<path d=\"M14 4a1 1 0 0 1 1-1\" /><path d=\"M15 10a1 1 0 0 1-1-1\" /><path d=\"M21 4a1 1 0 0 0-1-1\" /><path d=\"M21 9a1 1 0 0 1-1 1\" /><path d=\"m3 7 3 3 3-3\" /><path d=\"M6 10V5a2 2 0 0 1 2-2h2\" /><rect x=\"3\" y=\"14\" width=\"7\" height=\"7\" rx=\"1\" />","rotate-ccw":"<path d=\"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8\" /><path d=\"M3 3v5h5\" />","settings":"<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\" /><circle cx=\"12\" cy=\"12\" r=\"3\" />","shopping-bag":"<path d=\"M16 10a4 4 0 0 1-8 0\" /><path d=\"M3.103 6.034h17.794\" /><path d=\"M3.4 5.467a2 2 0 0 0-.4 1.2V20a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6.667a2 2 0 0 0-.4-1.2l-2-2.667A2 2 0 0 0 17 2H7a2 2 0 0 0-1.6.8z\" />","skip-forward":"<path d=\"M21 4v16\" /><path d=\"M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z\" />","sparkles":"<path d=\"M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z\" /><path d=\"M20 2v4\" /><path d=\"M22 4h-4\" /><circle cx=\"4\" cy=\"20\" r=\"2\" />","split":"<path d=\"M16 3h5v5\" /><path d=\"M8 3H3v5\" /><path d=\"M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3\" /><path d=\"m15 9 6-6\" />","stroke-width":"<path d=\"M3.25 3h17.5\" /><rect x=\"3\" y=\"7\" width=\"18\" height=\"4\" rx=\"1\" /><rect x=\"3\" y=\"15\" width=\"18\" height=\"6\" rx=\"1\" />","sun":"<circle cx=\"12\" cy=\"12\" r=\"4\" /><path d=\"M12 2v2\" /><path d=\"M12 20v2\" /><path d=\"m4.93 4.93 1.41 1.41\" /><path d=\"m17.66 17.66 1.41 1.41\" /><path d=\"M2 12h2\" /><path d=\"M20 12h2\" /><path d=\"m6.34 17.66-1.41 1.41\" /><path d=\"m19.07 4.93-1.41 1.41\" />","sun-moon":"<path d=\"M12 2v2\" /><path d=\"M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715\" /><path d=\"M16 12a4 4 0 0 0-4-4\" /><path d=\"m19 5-1.256 1.256\" /><path d=\"M20 12h2\" />","sunrise":"<path d=\"M12 2v8\" /><path d=\"m4.93 10.93 1.41 1.41\" /><path d=\"M2 18h2\" /><path d=\"M20 18h2\" /><path d=\"m19.07 10.93-1.41 1.41\" /><path d=\"M22 22H2\" /><path d=\"m8 6 4-4 4 4\" /><path d=\"M16 18a4 4 0 0 0-8 0\" />","sunset":"<path d=\"M12 10V2\" /><path d=\"m4.93 10.93 1.41 1.41\" /><path d=\"M2 18h2\" /><path d=\"M20 18h2\" /><path d=\"m19.07 10.93-1.41 1.41\" /><path d=\"M22 22H2\" /><path d=\"m16 6-4 4-4-4\" /><path d=\"M16 18a4 4 0 0 0-8 0\" />","tag":"<path d=\"M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z\" /><circle cx=\"7.5\" cy=\"7.5\" r=\".5\" fill=\"currentColor\" />","text":"<path d=\"M21 5H3\" /><path d=\"M15 12H3\" /><path d=\"M17 19H3\" />","timer":"<line x1=\"10\" x2=\"14\" y1=\"2\" y2=\"2\" /><line x1=\"12\" x2=\"15\" y1=\"14\" y2=\"11\" /><circle cx=\"12\" cy=\"14\" r=\"8\" />","trash-2":"<path d=\"M10 11v6\" /><path d=\"M14 11v6\" /><path d=\"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6\" /><path d=\"M3 6h18\" /><path d=\"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\" />","type":"<path d=\"M12 4v16\" /><path d=\"M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2\" /><path d=\"M9 20h6\" />","upload":"<path d=\"M12 3v12\" /><path d=\"m17 8-5-5-5 5\" /><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\" />","utensils":"<path d=\"M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2\" /><path d=\"M7 2v20\" /><path d=\"M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7\" />","view":"<path d=\"M21 17v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2\" /><path d=\"M21 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v2\" /><circle cx=\"12\" cy=\"12\" r=\"1\" /><path d=\"M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0\" />","wallet":"<path d=\"M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1\" /><path d=\"M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4\" />","wind":"<path d=\"M12.8 19.6A2 2 0 1 0 14 16H2\" /><path d=\"M17.5 8a2.5 2.5 0 1 1 2 4H2\" /><path d=\"M9.8 4.4A2 2 0 1 1 11 8H2\" />","x":"<path d=\"M18 6 6 18\" /><path d=\"m6 6 12 12\" />"};
 function icons() {
   document.querySelectorAll('i[data-lucide]').forEach(el => {
     const body = ICONS[el.getAttribute('data-lucide')];
@@ -309,17 +345,33 @@ function vOggi() {
   else if (pr.length === 3) prMsg = `<p class="mt-3 text-sm text-muted">Tre bastano. Il resto può aspettare.</p>`;
 
   const next = S.exams.filter(x => x.date && daysUntil(x.date) >= 0).sort((a, b) => a.date.localeCompare(b.date))[0];
+  const heavy = heavyOn();
 
   return `
   <section class="pt-1 pb-5">
     <div class="flex items-center gap-2 text-sage-600"><i data-lucide="${gIcon}" class="w-5 h-5"></i><span class="text-sm font-medium">${fmtLong(today)}</span></div>
     <h2 class="text-[28px] leading-tight font-bold text-ink mt-1.5">${greet}${S.name ? ', ' + esc(S.name) : ''}</h2>
-    <p class="text-muted mt-1 text-[16px]">${phrase()}</p>
-    <button data-action="quickAdd" class="mt-4 h-12 px-6 rounded-full bg-sage-500 text-white font-semibold inline-flex items-center gap-2 shadow-soft active:scale-95 transition">
-      <i data-lucide="plus" class="w-5 h-5"></i>Aggiungi
-    </button>
+    <p class="text-muted mt-1 text-[16px]">${heavy ? 'Oggi si va piano. Va benissimo così.' : phrase()}</p>
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button data-action="quickAdd" class="h-12 px-6 rounded-full bg-sage-500 text-white font-semibold inline-flex items-center gap-2 shadow-soft active:scale-95 transition">
+        <i data-lucide="plus" class="w-5 h-5"></i>Aggiungi
+      </button>
+      <button data-action="breath" class="h-12 px-5 rounded-full bg-surface text-sage-700 font-semibold inline-flex items-center gap-2 shadow-soft active:scale-95 transition">
+        <i data-lucide="wind" class="w-5 h-5"></i>Respira 1 minuto
+      </button>
+    </div>
   </section>
 
+  <button data-action="toggleHeavy" role="switch" aria-checked="${heavy}" class="card !p-4 mb-4 w-full flex items-center gap-3 text-left active:scale-[.99] transition ${heavy ? '!bg-lav-50' : ''}">
+    <span class="text-[22px] shrink-0">${heavy ? '💛' : '☁️'}</span>
+    <span class="flex-1 min-w-0">
+      <span class="block font-semibold text-ink">Giornata pesante</span>
+      <span class="block text-sm text-muted">${heavy ? 'Attiva fino a stanotte. Solo l’essenziale.' : 'Un tocco e mostro solo l’essenziale.'}</span>
+    </span>
+    <span class="sw ${heavy ? 'on' : ''}" aria-hidden="true"></span>
+  </button>
+
+  ${heavy ? heavyPrioCard(pr) : `
   <section class="card">
     <div class="flex items-center justify-between mb-2">
       <h3 class="h-card">Le 3 priorità di oggi</h3>
@@ -335,7 +387,7 @@ function vOggi() {
     ${!pr.length && yUndone.length ? `
       <button data-action="carryPrio" class="mt-3 w-full btn-soft !bg-lav-50 !text-lav-700"><i data-lucide="corner-down-right" class="w-4 h-4"></i>Riprendi ${yUndone.length === 1 ? 'quella' : 'quelle'} di ieri (${Math.min(yUndone.length, 3)})</button>` : ''}
     ${prMsg}
-  </section>
+  </section>`}
 
   <section class="card mt-4">
     <div class="flex items-center justify-between mb-1">
@@ -346,8 +398,31 @@ function vOggi() {
       : `<div class="py-5 text-center"><div class="text-3xl mb-1">🌿</div><p class="text-muted">Giornata libera. Goditi un po' di respiro.</p></div>`}
   </section>
 
-  ${next ? examMini(next) : ''}
+  ${next && !heavy ? examMini(next) : ''}
   `;
+}
+
+/* ---------- Modalità "giornata pesante" ----------
+   Vale solo per il giorno in cui la attiva (S.heavyDay = data ISO):
+   il giorno dopo la data non coincide più e tutto torna normale da solo.
+   Le altre priorità non vengono toccate, solo nascoste. */
+const heavyOn = () => S.heavyDay === iso(new Date());
+function heavyPrioCard(pr) {
+  const pick = pr.find(p => p.id === S.heavyPick) || pr.find(p => !p.done) || pr[0];
+  const others = pr.filter(p => p !== pick && !p.done);
+  return `
+  <section class="card !bg-lav-50">
+    <h3 class="h-card">Oggi basta una cosa</h3>
+    <p class="text-sm text-muted mt-1 mb-2">Solo questa. Tutto il resto può aspettare, e va bene così.</p>
+    ${pick ? checkRow(pick, 'togglePrio', 'delPrio') : `
+      <form data-form="addPrio" class="flex gap-2 mt-2">
+        <input name="text" class="inp flex-1" placeholder="Qual è l’unica cosa che conta oggi?" maxlength="80" autocomplete="off" enterkeyhint="done">
+        <button class="w-12 h-12 shrink-0 rounded-2xl bg-lav-100 text-lav-700 flex items-center justify-center active:scale-95 transition" aria-label="Aggiungi"><i data-lucide="plus" class="w-5 h-5"></i></button>
+      </form>`}
+    ${pick && pick.done ? `<p class="mt-3 text-lav-700 font-medium">Fatto. Per oggi è abbastanza 💛</p>` : ''}
+    ${pick && !pick.done && others.length ? `<button data-action="heavyNext" class="mt-1 h-11 text-sm font-medium text-lav-700 flex items-center gap-1.5"><i data-lucide="repeat" class="w-4 h-4"></i>Scegline un’altra</button>` : ''}
+    ${pr.length > 1 ? `<p class="text-xs text-muted mt-2">Le altre restano qui, al sicuro. Le ritrovi quando vuoi.</p>` : ''}
+  </section>`;
 }
 
 function checkRow(item, toggleAction, delAction, extra = '') {
@@ -580,6 +655,86 @@ function chime() {
   } catch (e) {}
 }
 
+/* ---------- Turni → ore e stipendio stimato ---------- */
+const toMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+/* Durata di un turno in minuti. Se la fine è prima dell'inizio, il turno passa la mezzanotte
+   (es. 18:00–02:00 = 8 h) e conta tutto nel giorno in cui inizia. Senza orari = 0. */
+function shiftMinutes(e) {
+  if (!e.start || !e.end) return 0;
+  let d = toMin(e.end) - toMin(e.start);
+  if (d < 0) d += 1440;
+  return d;
+}
+/* Minuti di lavoro tra due date ISO (incluse) + quanti turni non hanno orari */
+function workMinutes(from, to) {
+  let min = 0, noTime = 0;
+  S.events.forEach(e => {
+    if (e.tag !== 'lavoro' || e.date < from || e.date > to) return;
+    const m = shiftMinutes(e);
+    if (m) min += m; else noTime++;
+  });
+  return { min, noTime };
+}
+const fmtH = m => { const h = Math.floor(m / 60), r = m % 60; return r ? `${h} h ${pad(r)}` : `${h} h`; };
+const dayMonth = s => fromIso(s).toLocaleDateString('it-IT', { day:'numeric', month:'long' });
+
+/* Turni che restano da oggi all'ultimo giorno di lavoro (quelli di oggi già finiti non contano) */
+function shiftsLeft() {
+  const today = iso(new Date());
+  if (!S.workEnd || today > S.workEnd) return null;
+  const now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
+  const n = S.events.filter(e => e.tag === 'lavoro' && e.date >= today && e.date <= S.workEnd &&
+    !(e.date === today && e.start && e.end && e.end > e.start && toMin(e.end) <= nowMin)).length;
+  return { n, days: daysUntil(S.workEnd) };
+}
+
+/* Card "Turni" — usata in Agenda (settimana/mese selezionati) e in Portafoglio (mese visualizzato) */
+function workCard({ weekOf, ym }) {
+  if (!S.events.some(e => e.tag === 'lavoro')) return '';
+  const t = TAGS.lavoro, pay = +S.hourlyPay || 0;
+  const money = min => !pay ? '' : S.hideBalance ? '≈ € • • •' : '≈ ' + eur0(min / 60 * pay);
+  const tile = (label, w) => `
+    <div class="rounded-2xl bg-cream p-3">
+      <div class="text-xs text-muted">${label}</div>
+      <div class="text-[22px] font-bold text-ink tabular-nums leading-tight mt-1">${fmtH(w.min)}</div>
+      ${pay ? `<div class="text-sm text-sage-600 font-medium tabular-nums mt-0.5">${money(w.min)}</div>` : ''}
+      ${w.noTime ? `<div class="text-xs text-muted mt-1">+ ${w.noTime} ${w.noTime === 1 ? 'turno' : 'turni'} senza orari</div>` : ''}
+    </div>`;
+
+  const tiles = [];
+  if (weekOf) {
+    const ws = startOfWeek(weekOf), we = addDays(ws, 6), today = iso(new Date());
+    const isNow = today >= iso(ws) && today <= iso(we);
+    tiles.push(tile(isNow ? 'Questa settimana' : `Settimana dal ${ws.getDate()} ${ws.toLocaleDateString('it-IT', { month:'short' })}`, workMinutes(iso(ws), iso(we))));
+  }
+  tiles.push(tile(monthLabel(ym), workMinutes(ym + '-01', ym + '-31')));
+
+  const left = shiftsLeft();
+  let cd = '';
+  if (left) {
+    const end = dayMonth(S.workEnd);
+    const [big, small] =
+      left.n > 1   ? [`Ultimi ${left.n} turni 🌿`, `fino al ${end}`] :
+      left.n === 1 ? ['Ultimo turno 🌿', 'ce l’hai quasi fatta'] :
+      left.days > 0 ? [`Ancora ${left.days} ${left.days === 1 ? 'giorno' : 'giorni'} 🌿`, `fino al ${end}`] :
+                     ['Ultimo giorno 🌿', 'da domani si respira'];
+    cd = `<div class="mt-3 rounded-2xl px-3 py-2 flex items-center gap-2 flex-wrap" style="${soft(t.color, t.bg, t.text)}">
+      <span class="font-semibold">${big}</span><span class="text-sm">${small}</span></div>`;
+  }
+
+  return `
+  <section class="card mt-4">
+    <div class="flex items-center gap-3 mb-3">
+      <span class="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style="${soft(t.color, t.bg, t.text)}"><i data-lucide="briefcase" class="w-[18px] h-[18px]"></i></span>
+      <h3 class="h-card">Turni al negozio</h3>
+    </div>
+    <div class="grid ${tiles.length > 1 ? 'grid-cols-2' : ''} gap-3">${tiles.join('')}</div>
+    ${pay ? `<p class="text-xs text-muted mt-2 ml-1">Stima lorda, prima di tasse e trattenute.</p>`
+          : `<button data-action="settings" class="mt-2 h-11 text-sm font-medium text-sage-600 flex items-center gap-1">Imposta la paga oraria per la stima<i data-lucide="chevron-right" class="w-4 h-4"></i></button>`}
+    ${cd}
+  </section>`;
+}
+
 /* ---------- TAB 3: AGENDA ---------- */
 function vAgenda() {
   const today = iso(new Date());
@@ -635,7 +790,9 @@ function vAgenda() {
     </div>
     ${list.length ? `<div class="divide-y divide-black/5">${list.map(eventRow).join('')}</div>`
       : `<div class="py-6 text-center"><div class="text-3xl mb-1">☁️</div><p class="text-muted">Niente in programma.<br>Spazio per respirare.</p></div>`}
-  </section>`;
+  </section>
+
+  ${agHidden.has('lavoro') ? '' : workCard({ weekOf: agSel, ym: agSel.slice(0, 7) })}`;
 }
 
 function dayCell(d, inMonth, showDow, today) {
@@ -701,6 +858,8 @@ function vWallet() {
           </div>`; }).join('')}
       </div>` : ''}
   </section>
+
+  ${workCard({ weekOf: wMonth === today.slice(0, 7) ? today : null, ym: wMonth })}
 
   <section class="mt-4">
     ${list.length ? Object.entries(groups).map(([d, items]) => `
@@ -869,6 +1028,9 @@ function openSettings() {
     <label class="block"><span class="lbl">Il tuo nome</span><input name="name" class="inp" value="${esc(S.name)}" placeholder="Come vuoi essere chiamata?" maxlength="30" autocomplete="off"></label>
     <label class="block"><span class="lbl">Saldo di partenza (€)</span><input name="start" inputmode="decimal" class="inp" value="${String(S.startBalance || 0).replace('.', ',')}" autocomplete="off"></label>
     <p class="text-xs text-muted -mt-2 ml-1">Saldo mostrato = saldo di partenza + entrate − uscite.</p>
+    <label class="block"><span class="lbl">Paga oraria lorda (€, facoltativa)</span><input name="pay" inputmode="decimal" class="inp" value="${S.hourlyPay ? String(S.hourlyPay).replace('.', ',') : ''}" placeholder="Es. 8,50" autocomplete="off"></label>
+    <label class="block"><span class="lbl">Ultimo giorno di lavoro (facoltativo)</span><input name="workEnd" type="date" class="inp" value="${S.workEnd || ''}"></label>
+    <p class="text-xs text-muted -mt-2 ml-1">Servono per stimare lo stipendio dai turni e contare quelli che mancano.</p>
     <button class="btn-primary">Salva</button>
   </form>
 
@@ -953,6 +1115,134 @@ function importBackup(file) {
 }
 
 /* =========================================================
+   RESPIRO GUIDATO — 1 minuto: 4s inspira, 6s espira, 6 cicli
+   Tutto è calcolato dal tempo trascorso (come il Timer Focus),
+   così testo, numero e cerchio restano sempre sincronizzati.
+   ========================================================= */
+const BR = { lead:3000, inh:4000, exh:6000, cycles:6, min:.5 };   // min = grandezza del cerchio a polmoni vuoti
+const reduceMQ = matchMedia('(prefers-reduced-motion: reduce)');
+const brEase = x => (1 - Math.cos(Math.PI * x)) / 2;              // morbida all'inizio e alla fine
+let br = null;   // sessione in corso: { start, pausedAt, raf, lock, done, last }
+
+function openBreath() {
+  unlockAudio();   // il tap sblocca l'audio per il suono gentile finale
+  $('#breath-root').innerHTML = `
+  <div id="breath" role="dialog" aria-modal="true" aria-label="Respiro guidato">
+    <div class="w-full max-w-xl flex justify-end">
+      <button data-action="breathClose" class="icon-btn bg-surface shadow-soft text-muted" aria-label="Chiudi"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div class="flex flex-col items-center text-center">
+      <div class="br-stage">
+        <span class="br-halo"></span>
+        <span id="br-ball" class="br-ball"></span>
+        <span id="br-num" class="br-num"></span>
+      </div>
+      <p id="br-phase" class="text-[28px] font-semibold text-ink mt-7" role="status" aria-live="polite"></p>
+      <p id="br-sub" class="text-muted mt-1 text-[16px]"></p>
+      <div id="br-dots" class="flex gap-2 mt-5">${'<span class="br-dot"></span>'.repeat(BR.cycles)}</div>
+    </div>
+    <div id="br-foot" class="w-full max-w-xl" style="min-height:120px"></div>
+  </div>`;
+  document.body.classList.add('breath-open');
+  icons();
+  requestAnimationFrame(() => requestAnimationFrame(() => $('#breath')?.classList.add('on')));
+  startBreath();
+}
+
+function startBreath() {
+  if (br) cancelAnimationFrame(br.raf);
+  br = { start: Date.now(), pausedAt: null, raf: 0, lock: null, done: false, last: {} };
+  document.querySelectorAll('#br-dots .br-dot').forEach(d => d.classList.remove('on'));
+  $('#br-foot').innerHTML = `<p class="text-center text-sm text-muted pt-4">Un minuto solo per te. Va bene anche se ti distrai.</p>`;
+  brWake();
+  br.raf = requestAnimationFrame(breathFrame);
+}
+
+/* Aggiorna il DOM solo se il valore è cambiato (niente annunci ripetuti a VoiceOver) */
+function brSet(id, val) {
+  if (br.last[id] === val) return;
+  br.last[id] = val;
+  const el = $('#' + id); if (el) el.textContent = val;
+}
+
+function breathFrame() {
+  if (!br || br.done || br.pausedAt) return;
+  const t = Date.now() - br.start, cyc = BR.inh + BR.exh;
+  let size = 0, phase, sub, num = '', idx = -1;   // size: 0 = cerchio piccolo, 1 = cerchio pieno
+
+  if (t < BR.lead) {
+    phase = 'Mettiti comoda'; sub = 'Spalle giù, mandibola morbida.';
+    num = String(Math.ceil((BR.lead - t) / 1000));
+  } else if (t < BR.lead + cyc * BR.cycles) {
+    const k = t - BR.lead, p = k % cyc;
+    idx = Math.floor(k / cyc);
+    sub = `Ciclo ${idx + 1} di ${BR.cycles}`;
+    if (p < BR.inh) { size = brEase(p / BR.inh);            phase = 'Inspira…'; num = String(Math.ceil((BR.inh - p) / 1000)); }
+    else            { size = 1 - brEase((p - BR.inh) / BR.exh); phase = 'Espira…'; num = String(Math.ceil((cyc - p) / 1000)); }
+  } else { finishBreath(); return; }
+
+  const ball = $('#br-ball');
+  if (ball) {
+    if (reduceMQ.matches) {   // niente movimento: il cerchio resta fermo e "respira" solo con la luce
+      ball.style.transform = 'scale(.8)';
+      ball.style.opacity = (.45 + .55 * size).toFixed(3);
+    } else {
+      ball.style.transform = `scale(${(BR.min + (1 - BR.min) * size).toFixed(4)})`;
+      ball.style.opacity = '';
+    }
+  }
+  brSet('br-phase', phase); brSet('br-sub', sub); brSet('br-num', num);
+  if (br.last.idx !== idx) {
+    br.last.idx = idx;
+    document.querySelectorAll('#br-dots .br-dot').forEach((d, i) => d.classList.toggle('on', i <= idx));
+  }
+  br.raf = requestAnimationFrame(breathFrame);
+}
+
+function finishBreath() {
+  br.done = true;
+  brRelease();
+  const ball = $('#br-ball');
+  if (ball) { ball.style.transform = reduceMQ.matches ? 'scale(.8)' : `scale(${BR.min})`; ball.style.opacity = ''; }
+  brSet('br-num', '🌿'); brSet('br-phase', 'Fatto'); brSet('br-sub', 'Un minuto tutto per te. Brava.');
+  document.querySelectorAll('#br-dots .br-dot').forEach(d => d.classList.add('on'));
+  $('#br-foot').innerHTML = `
+    <div class="space-y-2">
+      <button data-action="breathAgain" class="btn-primary">Ancora un minuto</button>
+      <button data-action="breathClose" class="btn-soft w-full">Torna alla giornata</button>
+    </div>`;
+  chime();
+}
+
+function closeBreath() {
+  if (br) { cancelAnimationFrame(br.raf); brRelease(); }
+  br = null;
+  document.body.classList.remove('breath-open');
+  const el = $('#breath');
+  if (!el) return;
+  el.classList.remove('on');
+  setTimeout(() => { if (!br) $('#breath-root').innerHTML = ''; }, reduceMQ.matches ? 0 : 400);
+}
+
+/* Schermo acceso durante l'esercizio (Wake Lock, se l'iPhone lo supporta) */
+async function brWake() {
+  const s = br;
+  try {
+    if (!('wakeLock' in navigator)) return;
+    const lock = await navigator.wakeLock.request('screen');
+    if (br === s && !s.done) s.lock = lock; else lock.release();
+  } catch (e) {}
+}
+function brRelease() { try { br && br.lock && br.lock.release(); } catch (e) {} if (br) br.lock = null; }
+
+/* Se esce dall'app a metà, l'esercizio si mette in pausa e riprende da dove era */
+document.addEventListener('visibilitychange', () => {
+  if (!br || br.done) return;
+  if (document.visibilityState === 'hidden') { br.pausedAt = Date.now(); cancelAnimationFrame(br.raf); }
+  else if (br.pausedAt) { br.start += Date.now() - br.pausedAt; br.pausedAt = null; brWake(); br.raf = requestAnimationFrame(breathFrame); }
+});
+
+/* =========================================================
    AZIONI (event delegation)
    ========================================================= */
 const actions = {
@@ -970,7 +1260,8 @@ const actions = {
     const p = (S.priorities[iso(new Date())] || []).find(x => x.id === el.dataset.id);
     if (!p) return;
     p.done = !p.done; save(); render();
-    if (p.done) { const all = S.priorities[iso(new Date())]; if (all.every(x => x.done)) toast('Tutte fatte. Brava 💛'); }
+    if (p.done && heavyOn()) toast('Fatto. Per oggi basta così 💛');
+    else if (p.done) { const all = S.priorities[iso(new Date())]; if (all.every(x => x.done)) toast('Tutte fatte. Brava 💛'); }
   },
   delPrio: el => { const d = iso(new Date()); S.priorities[d] = (S.priorities[d] || []).filter(x => x.id !== el.dataset.id); save(); closeSheet(); render(); },
   editItem: el => openItemForm(el.dataset.kind, el.dataset.id, el.dataset.ex),
@@ -980,6 +1271,24 @@ const actions = {
     save(); render();
   },
   goStudio: () => { tab = 'studio'; window.scrollTo(0, 0); render(); },
+  toggleHeavy: () => {
+    const on = !heavyOn();
+    S.heavyDay = on ? iso(new Date()) : '';
+    S.heavyPick = '';
+    save(); render();
+    toast(on ? 'Ok. Oggi andiamo piano 💛' : 'Tutto di nuovo visibile 🌿');
+  },
+  heavyNext: () => {   // passa alla prossima priorità non ancora fatta
+    const pr = S.priorities[iso(new Date())] || [];
+    const undone = pr.filter(p => !p.done);
+    if (undone.length < 2) return;
+    const cur = undone.findIndex(p => p.id === S.heavyPick);
+    S.heavyPick = undone[(Math.max(cur, 0) + 1) % undone.length].id;
+    save(); render();
+  },
+  breath: openBreath,
+  breathAgain: startBreath,
+  breathClose: () => closeBreath(),
 
   // Studio
   newExam: () => openExamForm(),
@@ -1151,6 +1460,8 @@ const forms = {
   settings: f => {
     S.name = fv(f, 'name').trim();
     if (fel(f, 'start')) { const b = parseAmount(fv(f, 'start')); S.startBalance = isFinite(b) ? b : 0; }
+    if (fel(f, 'pay')) { const p = parseAmount(fv(f, 'pay')); S.hourlyPay = p > 0 ? p : 0; }   // vuoto = nessuna stima
+    if (fel(f, 'workEnd')) S.workEnd = fv(f, 'workEnd');
     save(); closeSheet(); render();
     toast(f.dataset.welcome && S.name ? `Benvenuta, ${S.name} 🌿` : 'Salvato ✓');
   }
